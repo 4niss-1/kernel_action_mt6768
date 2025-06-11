@@ -1,4 +1,5 @@
 name: Build Kernel [Lancelot]
+
 on:
   workflow_dispatch:
     inputs:
@@ -36,11 +37,11 @@ jobs:
           if [[ "${{ github.event.inputs.build_ksun_old }}" == "true" ]]; then targets+=("ksun-old"); fi
           if [[ "${{ github.event.inputs.build_suki }}" == "true" ]]; then targets+=("suki"); fi
           if [[ "${{ github.event.inputs.build_suki_old }}" == "true" ]]; then targets+=("suki-old"); fi
-          json=$(printf '%s\n' "${targets[@]}" | jq -R . | jq -s '{target: .}')
+          json=$(printf '%s\n' "${targets[@]}" | jq -R . | jq -s '{"target": .}')
           echo "matrix<<EOF" >> $GITHUB_OUTPUT
           echo "$json" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          
+
   build:
     needs: generate-build-matrix
     runs-on: ubuntu-22.04
@@ -51,139 +52,45 @@ jobs:
     strategy:
       matrix: ${{ fromJson(needs.generate-build-matrix.outputs.matrix) }}
     steps:
-    - uses: actions/checkout@v4
-    - name: Find correct config name
-      run: |
-        TARGET_CONFIG_FILENAME="${{ matrix.target }}"
-        TARGET_CONFIG_FILENAME="${TARGET_CONFIG_FILENAME/-old/}"
-        echo "TARGET_CONFIG_FILENAME_SUFFIX=$TARGET_CONFIG_FILENAME" >> $GITHUB_ENV
-    - name: Prepare Environment
-      run: |
-        grep -v -E "^#|^\n" config-lancelot-${{ env.TARGET_CONFIG_FILENAME_SUFFIX }}.env | sed 's/ #.*//; s/#.*//' >> $GITHUB_ENV
-    - name: Remove unused packages
-      if: env.REMOVE_UNUSED_PACKAGES == 'true'
-      uses: jlumbroso/free-disk-space@main
-      with:
-        tool-cache: true
-        android: false
-        dotnet: true
-        haskell: true
-        large-packages: true
-        docker-images: true
-        swap-storage: false
+      - uses: actions/checkout@v4
 
-    - name: Set swap to 10G
-      uses: pierotofy/set-swap-space@master
-      with:
-        swap-size-gb: 10
+      - name: Find correct config name
+        run: |
+          TARGET_CONFIG_FILENAME="${{ matrix.target }}"
+          TARGET_CONFIG_FILENAME="${TARGET_CONFIG_FILENAME/-old/}"
+          echo "TARGET_CONFIG_FILENAME_SUFFIX=$TARGET_CONFIG_FILENAME" >> $GITHUB_ENV
 
-    - name: Setup kernel build environment
-      run: |
-        echo "BUILD_TIME=$(TZ=UTC date "+%Y%m%d%H%M")" >> $GITHUB_ENV
-        echo "DEVICE=$(echo ${{ env.KERNEL_CONFIG }} | sed 's!vendor/!!;s/_defconfig//;s/_user//;s/-perf//')" >> $GITHUB_ENV
-        sudo apt-get update
-        sudo apt-get install git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python2 python3 binutils-aarch64-linux-gnu
-        mkdir -p $GITHUB_WORKSPACE/kernel_workspace
-    - name: Download AOSP Clang
-      if: env.USE_CUSTOM_CLANG != 'true' && env.USE_CUSTOM_GCC != 'true' && env.ENABLE_GCC_AOSP != 'true' && env.USE_NEUTRON_CLANG != 'true'
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace
-        mkdir clang
-        wget -nv https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${{ env.CLANG_BRANCH }}/clang-${{ env.CLANG_VERSION }}.tar.gz
-        tar -C clang/ -zxvf clang-${{ env.CLANG_VERSION }}.tar.gz
-    - name: Download Custom Clang
-      if: env.USE_CUSTOM_CLANG == 'true' && env.USE_CUSTOM_GCC != 'true' && env.ENABLE_GCC_AOSP != 'true' && env.USE_NEUTRON_CLANG != 'true'
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace
-        if [[ ${{ env.CUSTOM_CLANG_SOURCE }} == *'.tar.gz' ]]; then
-            wget -nv -O clang.tar.gz ${{ env.CUSTOM_CLANG_SOURCE }}
-            mkdir clang
-            tar -C clang/ -zxvf clang.tar.gz
-        elif [[ ${{ env.CUSTOM_CLANG_SOURCE }} == *'.tar.xz' ]]; then
-            wget -nv -O clang.tar.xz ${{ env.CUSTOM_CLANG_SOURCE }}
-            mkdir clang
-            tar -C clang/ -Jxvf clang.tar.xz
-        elif [[ ${{ env.CUSTOM_CLANG_SOURCE }} == *'.git' ]]; then
-            git clone ${{ env.CUSTOM_CLANG_SOURCE }} -b ${{ env.CUSTOM_CLANG_BRANCH }} clang --depth=1
-        else
-            wget -nv -O clang.zip ${{ env.CUSTOM_CLANG_SOURCE }}
-            mkdir clang
-            unzip clang.zip -d clang/
-        fi
-        if [[ "$(find ./clang -mindepth 1 -maxdepth 1 -type d | wc -l)" == "1" ]]; then
-            mv -f "$(find ./clang -mindepth 1 -maxdepth 1 -type d)"/* ./clang
-        fi
-    - name: Download GCC AOSP
-      if: env.ENABLE_GCC_AOSP == 'true' && env.USE_CUSTOM_GCC != 'true' && env.USE_CUSTOM_CLANG != 'true' && env.USE_NEUTRON_CLANG != 'true'
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace
-        if [ ${{ env.ENABLE_GCC_ARM64 }} = true ]; then
-            mkdir gcc-64
-            wget -nv -O gcc-aarch64.tar.gz https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz
-            tar -C gcc-64/ -zxvf gcc-aarch64.tar.gz
-            echo "GCC_64=CROSS_COMPILE=$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin/aarch64-linux-android-" >> $GITHUB_ENV
-        fi
-        if [ ${{ env.ENABLE_GCC_ARM32 }} = true ]; then
-            mkdir gcc-32
-            wget -nv -O gcc-arm.tar.gz https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz
-            tar -C gcc-32/ -zxvf gcc-arm.tar.gz
-            echo "GCC_32=CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/kernel_workspace/gcc-32/bin/arm-linux-androideabi-" >> $GITHUB_ENV
-        fi
-    - name: Download Custom GCC
-      if: env.USE_CUSTOM_GCC == 'true' && env.ENABLE_GCC_AOSP != 'true' && env.USE_CUSTOM_CLANG != 'true' && env.USE_NEUTRON_CLANG != 'true'
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace
-        if [ ${{ env.USE_CUSTOM_GCC_64 }} = true ]; then
-            if [[ ${{ env.CUSTOM_GCC_64_SOURCE }} == *'.tar.gz' ]]; then
-                wget -nv -O gcc-64.tar.gz ${{ env.CUSTOM_GCC_64_SOURCE }}
-                mkdir gcc-64
-                tar -C gcc-64/ -zxvf gcc-64.tar.gz
-            elif [[ ${{ env.CUSTOM_GCC_64_SOURCE }} == *'.tar.xz' ]]; then
-                wget -nv -O gcc-64.xz ${{ env.CUSTOM_GCC_64_SOURCE }}
-                mkdir gcc-64
-                tar -C gcc-64/ -Jxvf gcc-64.xz
-            elif [[ ${{ env.CUSTOM_GCC_64_SOURCE }} == *'.git' ]]; then
-                git clone ${{ env.CUSTOM_GCC_64_SOURCE }} -b ${{ env.CUSTOM_GCC_64_BRANCH }} gcc-64 --depth=1
-            else
-                wget -nv -O gcc-64.zip ${{ env.CUSTOM_GCC_64_SOURCE }}
-                mkdir gcc-64
-                unzip gcc-64.zip -d gcc-64/
-            fi
-            if [[ "$(find ./gcc-64 -mindepth 1 -maxdepth 1 -type d | wc -l)" == "1" ]]; then
-                mv -f "$(find ./gcc-64 -mindepth 1 -maxdepth 1 -type d)"/* ./gcc-64
-            fi
-        fi
-        if [ ${{ env.USE_CUSTOM_GCC_32 }} = true ]; then
-            if [[ ${{ env.CUSTOM_GCC_32_SOURCE }} == *'.tar.gz' ]]; then
-                wget -nv -O gcc-32.tar.gz ${{ env.CUSTOM_GCC_32_SOURCE }}
-                mkdir gcc-32
-                tar -C gcc-32/ -zxvf gcc-32.tar.gz
-            elif [[ ${{ env.CUSTOM_GCC_32_SOURCE }} == *'.tar.xz' ]]; then
-                wget -nv -O gcc-32.xz ${{ env.CUSTOM_GCC_32_SOURCE }}
-                mkdir gcc-32
-                tar -C gcc-32/ -Jxvf gcc-32.xz
-            elif [[ ${{ env.CUSTOM_GCC_32_SOURCE }} == *'.git' ]]; then
-                git clone ${{ env.CUSTOM_GCC_32_SOURCE }} -b ${{ env.CUSTOM_GCC_32_BRANCH }} gcc-32 --depth=1
-            else
-                wget -nv -O gcc-32.zip ${{ env.CUSTOM_GCC_32_SOURCE }}
-                mkdir gcc-32
-                unzip gcc-32.zip -d gcc-32/
-            fi
-            if [[ "$(find ./gcc-32 -mindepth 1 -maxdepth 1 -type d | wc -l)" == "1" ]]; then
-                mv -f "$(find ./gcc-32 -mindepth 1 -maxdepth 1 -type d)"/* ./gcc-32
-            fi
-        fi
-    - name: Download Neutron Clang
-      if: env.USE_CUSTOM_GCC != 'true' && env.ENABLE_GCC_AOSP != 'true' && env.USE_CUSTOM_CLANG != 'true' && env.USE_NEUTRON_CLANG == 'true'
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace
-        mkdir -p clang
-        cd clang
-        curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
-        chmod +x antman
-        ./antman -S
-        export HOME=$GITHUB_WORKSPACE/kernel_workspace
-        ./antman --patch=glibc
+      - name: Prepare Environment
+        run: |
+          grep -v -E "^#|^$" config-lancelot-${{ env.TARGET_CONFIG_FILENAME_SUFFIX }}.env | sed 's/ #.*//; s/#.*//' >> $GITHUB_ENV
+
+      - name: Debug env
+        run: |
+          echo "USE_CUSTOM_CLANG=$USE_CUSTOM_CLANG"
+          echo "USE_NEUTRON_CLANG=$USE_NEUTRON_CLANG"
+          echo "CLANG_BRANCH=$CLANG_BRANCH"
+          echo "CLANG_VERSION=$CLANG_VERSION"
+
+      - name: Download AOSP Clang
+        if: env.USE_CUSTOM_CLANG != 'true' && env.USE_CUSTOM_GCC != 'true' && env.ENABLE_GCC_AOSP != 'true' && env.USE_NEUTRON_CLANG != 'true'
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace
+          mkdir clang
+          wget -nv https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${CLANG_BRANCH:-master}/clang-${CLANG_VERSION:-clang-r547379}.tar.gz -O clang.tar.gz
+          tar -C clang/ -zxvf clang.tar.gz
+
+      - name: Download Neutron Clang
+        if: env.USE_NEUTRON_CLANG == 'true' && env.USE_CUSTOM_CLANG != 'true'
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace
+          mkdir -p clang
+          cd clang
+          curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+          chmod +x antman
+          ./antman -S
+          export HOME=$GITHUB_WORKSPACE/kernel_workspace
+          ./antman --patch=glibc
+          
     - name: Download mkbootimg tools
       if: env.BUILD_BOOT_IMG == 'true'
       run: |
